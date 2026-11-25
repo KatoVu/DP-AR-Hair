@@ -180,13 +180,14 @@ class Trainer:
 
                     global_step += 1
 
-        # epoch end — checkpoint
-        if self.first_processor \
-                and ((epoch + 1) % self.args.save_weight_every) == 0:
-            ck_path = os.path.join(
-                self.args.save_dir, f"epoch_{epoch+1:04d}.pt")
-            self.pipeline.save_checkpoint(ck_path, epoch=epoch)
-            print(f"Saved checkpoint: {ck_path}")
+                # epoch end — checkpoint (also always save the last epoch)
+                last_epoch = epoch + 1 == self.args.epochs
+                if self.first_processor and (
+                        last_epoch or (epoch + 1) % self.args.save_weight_every == 0):
+                    ck_path = os.path.join(
+                        self.args.save_dir, f"epoch_{epoch+1:04d}.pt")
+                    self.pipeline.save_checkpoint(ck_path, epoch=epoch)
+                    print(f"Saved checkpoint: {ck_path}")
 
         dist.destroy_process_group()
         print("Training complete.")
@@ -214,7 +215,8 @@ class Trainer:
             mini_batch_size=self.args.mini_batch_size,
             scaler=self.scaler,
             accumulate_grad_contrib=grad_contrib,
-            store_outputs=save_debug)
+            store_outputs=save_debug,
+            global_step=global_step)
 
         # Log gradient norms every step
         if first_processor:

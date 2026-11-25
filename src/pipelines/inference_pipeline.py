@@ -1,7 +1,8 @@
 import torch
 from loaders.loader import load_models
 from models.msg_spade_decoder import MSGSpadeDecoder
-from configs.model_config import model_config
+from face_parsing.models.utils import get_mask_by_idx
+from hairshifter.utils import strip_ddp_prefix
 
 
 class InferencePipeline:
@@ -26,18 +27,18 @@ class InferencePipeline:
         self.M_C = load_models("M_C", pretrained=True,
                                freeze=True).to(self.device)
 
-        # WARN: This is not very configurable
-        # Setting the upscale to 2 so output is 512x512
-        D_S_config = model_config.synthesis_decoder_params.model_dump()
-        D_S_config["upscale"] = 2
-
+        # Same upscale as training: the trained output head is conv_img (64->3).
+        # Upscaling to frame_size happens in inference.py
         # D_S will load and freeze all params except for GF_SPADEs
         self.D_S = load_models("D_S", pretrained=loaded,
-                               strict=False, freeze=True,
-                               params=D_S_config).to(self.device)
+                               strict=False, freeze=True).to(self.device)
         self.D_C = load_models("D_C", pretrained=loaded,
                                freeze=True).to(self.device)
         self.D = MSGSpadeDecoder(self.D_C, self.D_S)
+
+        # E_C has BatchNorm and is never put in eval by load_models
+        for module in (self.E_C, self.D_S, self.D_C):
+            module.eval()
 
         self.modules_to_load = {
             "E_C": self.E_C,
@@ -72,9 +73,9 @@ class InferencePipeline:
             f_w = self.W(feature_3d=f_h, kp_source=f_m,
                          kp_driving=f_m_d)['out']
 
-            # Mask is not strictly required in inference
-            # Keep batch and channel, zeros the rest
-            m_c = torch.zeros_like(f_c[:, :1])
+            # Same hair mask as training (class 17 on the context image)
+            m_c = get_mask_by_idx(I_d_t, self.M_C,
+                                  device=self.device, class_idx=17)
             I_p = self.D(f_c, f_w, m_c)
 
             return I_p
@@ -85,15 +86,13 @@ class InferencePipeline:
         """
         ck = torch.load(path, map_location=self.device)
         for name, module in self.modules_to_load.items():
-            if name in ck:
-                try:
-                    module.load_state_dict(ck[name], strict=False)
-                except Exception:
-                    module.load_state_dict(ck[name])
+            # strict: a silent partial load gives gibberish output
+            module.load_state_dict(strip_ddp_prefix(ck[name]))
 
         if "ema" in ck:
+            ema = strip_ddp_prefix(ck["ema"])
             for name, param in self.generator_trainable_dict.items():
-                if param.requires_grad and name in ck['ema']:
-                    self.ema.shadow[name] = ck['ema'][name].clone()
+                if param.requires_grad and name in ema:
+                    self.ema.shadow[name] = ema[name].clone()
 
         return ck

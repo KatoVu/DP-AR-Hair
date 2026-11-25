@@ -33,7 +33,8 @@ class LossHandler:
         # Loss weights from config
         self.weights = pco.training.loss
 
-    def compute_generator_losses(self, I_d, I_p, m_c, m_f, discriminator):
+    def compute_generator_losses(self, I_d, I_p, m_c, m_f, discriminator,
+                                 amp=False, adv_scale=1.0):
         """
         Compute all generator losses.
 
@@ -43,6 +44,8 @@ class LossHandler:
             m_c: Hair mask (B, 1, H, W)
             m_f: Non hair mask (B, 1, H, W)
             discriminator: discriminator network (for adversarial loss)
+            amp: run under autocast (must match whether GradScaler is enabled)
+            adv_scale: extra multiplier on adversarial weight (warmup ramp)
 
         Returns:
             dict of losses:
@@ -53,7 +56,7 @@ class LossHandler:
                 g_loss: global L1 loss
                 a_gen_loss: adversarial loss for generator
         """
-        with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+        with torch.cuda.amp.autocast(enabled=amp):
             # Perceptual loss
             perceptual_loss = self.weights.p_rate * self.L_p(self.normalize(
                 I_p), self.normalize(I_d))
@@ -70,7 +73,7 @@ class LossHandler:
         # Make sure its in FP32
         pred_fake = discriminator(I_p.float())
         target_real = torch.ones_like(pred_fake)
-        a_gen_loss = self.weights.adv_rate * \
+        a_gen_loss = adv_scale * self.weights.adv_rate * \
             self.disc_criterion(pred_fake, target_real)
 
         # Calculate the gradient contribution of each loss

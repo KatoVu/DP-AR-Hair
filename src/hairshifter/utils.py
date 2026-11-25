@@ -108,3 +108,14 @@ def discriminator_augment_pair(I_d, I_p, p=0.5):
                 I_p_aug[i] = I_p_aug[i] + noise
 
     return I_d_aug, I_p_aug
+
+
+def unwrap(module):
+    """Return the inner module of a DDP wrapper, or the module itself."""
+    return module.module if isinstance(
+        module, torch.nn.parallel.DistributedDataParallel) else module
+
+
+def strip_ddp_prefix(state_dict):
+    """Drop the DDP "module." key prefix so old checkpoints load unwrapped."""
+    return {k.removeprefix("module."): v for k, v in state_dict.items()}

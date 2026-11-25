@@ -55,12 +55,13 @@ class PatchGANDiscriminator(nn.Module):
 
 
 def weights_init(m: nn.Module):
-    # SpectralNorm wraps weights as `weight_orig`
+    # parametrizations.spectral_norm keeps the raw weight at
+    # parametrizations.weight.original; m.weight is recomputed each access
     if isinstance(m, nn.Conv2d):
-        if hasattr(m, "weight_orig"):
+        if hasattr(m, "parametrizations"):
             # Spectral-normalized Conv2d
             init.kaiming_normal_(
-                m.weight_orig,
+                m.parametrizations.weight.original,
                 a=0.2,
                 mode="fan_in",
                 nonlinearity="leaky_relu",

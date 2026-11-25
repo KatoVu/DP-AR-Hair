@@ -7,7 +7,12 @@ from loaders.loader import load_models
 from models.msg_spade_decoder import MSGSpadeDecoder
 from losses.loss_handler import LossHandler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from hairshifter.utils import discriminator_augment_pair, jitter_binary_mask
+from hairshifter.utils import (
+    discriminator_augment_pair,
+    jitter_binary_mask,
+    strip_ddp_prefix,
+    unwrap,
+)
 from configs.pipeline_config import pipeline_config as pco
 
 
@@ -49,10 +54,12 @@ class TrainingPipeline:
         self.D = MSGSpadeDecoder(self.D_C, self.D_S)
 
         # include any parameters that require grad from D_S and E_C
+        # Use the unwrapped modules so names have no DDP "module." prefix
+        # and match the keys InferencePipeline expects
         self.synthesizer_decoder_trainable_dict = {
-            k: p for k, p in self.D_S.named_parameters() if p.requires_grad}
+            k: p for k, p in self.D_S.module.named_parameters() if p.requires_grad}
         self.context_encoder_trainable_dict = {
-            k: p for k, p in self.E_C.named_parameters() if p.requires_grad}
+            k: p for k, p in self.E_C.module.named_parameters() if p.requires_grad}
         self.generator_trainable_dict = self.synthesizer_decoder_trainable_dict | \
             self.context_encoder_trainable_dict
 
@@ -102,6 +109,7 @@ class TrainingPipeline:
         mini_batch_size,
         accumulate_grad_contrib=False,
         store_outputs=False,
+        global_step=0,
     ):
         """
         Perform a single training step (one batch) with gradient accumulation.
@@ -120,6 +128,13 @@ class TrainingPipeline:
         assert mini_batch_size <= batch_size
 
         steps = ceil(batch_size / mini_batch_size)
+
+        # fp16 forward without GradScaler underflows gradients
+        amp = scaler.is_enabled()
+
+        # Let reconstruction losses settle before the adversarial loss kicks in
+        warmup = pco.training.loss.adv_warmup_steps
+        adv_scale = min(1.0, global_step / warmup) if warmup > 0 else 1.0
         for i in range(steps):
             # This is for gradient accumulation
             start = mini_batch_size * i
@@ -141,7 +156,7 @@ class TrainingPipeline:
                     m_c, p=pco.training.stablizers.mask_jitter_prob)
                 m_f = 1 - m_c  # Inverted m_c or non-hair binary mask
 
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.cuda.amp.autocast(enabled=amp):
                 f_h = self.E_H(I_s)
                 f_m = self.E_M(I_s)["kp"].view(I_s.size(0), -1, 3)
                 f_m_d = self.E_M(I_d)["kp"].view(I_s.size(0), -1, 3)
@@ -171,7 +186,7 @@ class TrainingPipeline:
 
             del disc_loss
 
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.cuda.amp.autocast(enabled=amp):
                 f_c = self.E_C(I_d_dilde)
                 I_p = self.D(f_c, f_w, m_c)
 
@@ -182,7 +197,8 @@ class TrainingPipeline:
                 p.requires_grad = False
 
             gen_losses = self.losses.compute_generator_losses(
-                I_d, I_p, m_c, m_f, self.L_adv)
+                I_d, I_p, m_c, m_f, self.L_adv,
+                amp=amp, adv_scale=adv_scale)
 
             gen_loss = gen_losses["generator_loss"]
             for k, v in gen_losses.items():
@@ -214,13 +230,9 @@ class TrainingPipeline:
         extra: optional dict with arbitrary metadata.
         """
         payload = {"epoch": epoch}
-        # modules
+        # Save unwrapped modules so checkpoints load without DDP
         for name, module in self.modules_to_save.items():
-            try:
-                payload[name] = module.state_dict()
-            except Exception:
-                # fallback: skip
-                pass
+            payload[name] = unwrap(module).state_dict()
 
         # optimizers
         payload["generator_optimizer"] = self.generator_optimizer.state_dict()
@@ -240,10 +252,7 @@ class TrainingPipeline:
         ck = torch.load(path, map_location=self.device)
         for name, module in self.modules_to_save.items():
             if name in ck:
-                try:
-                    module.load_state_dict(ck[name], strict=False)
-                except Exception:
-                    module.load_state_dict(ck[name])
+                unwrap(module).load_state_dict(strip_ddp_prefix(ck[name]))
 
         if load_optimizers:
             if "generator_optimizer" in ck:
@@ -254,8 +263,9 @@ class TrainingPipeline:
                 self.disc_optimizer.load_state_dict(ck["disc_optimizer"])
 
             if "ema" in ck:
+                ema = strip_ddp_prefix(ck["ema"])
                 for name, param in self.generator_trainable_dict.items():
-                    if param.requires_grad and name in ck['ema']:
-                        self.ema.shadow[name] = ck['ema'][name].clone()
+                    if param.requires_grad and name in ema:
+                        self.ema.shadow[name] = ema[name].clone()
 
         return ck
