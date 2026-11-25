@@ -6,10 +6,11 @@ training:
     learn_rate: 2e-4
     betas: [0.5, 0.999]
   generator:
-    learn_rate: 2e-5
+    learn_rate: 1e-4
     betas: [0.5, 0.999]
   loss:
-    adv_rate: 1
+    adv_rate: 0.1
+    adv_warmup_steps: 2000
     rec_rate: 1
     p_rate: 1
     h_rate: 1

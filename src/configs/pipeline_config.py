@@ -16,6 +16,8 @@ class LossConfig(BaseModel):
     p_rate: float
     h_rate: float
     f_rate: float
+    # Steps over which adversarial weight ramps 0 -> adv_rate
+    adv_warmup_steps: int = 0
 
 
 class GeneratorConfig(BaseModel):

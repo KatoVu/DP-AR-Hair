@@ -109,6 +109,7 @@ class TrainingPipeline:
         mini_batch_size,
         accumulate_grad_contrib=False,
         store_outputs=False,
+        global_step=0,
     ):
         """
         Perform a single training step (one batch) with gradient accumulation.
@@ -127,6 +128,13 @@ class TrainingPipeline:
         assert mini_batch_size <= batch_size
 
         steps = ceil(batch_size / mini_batch_size)
+
+        # fp16 forward without GradScaler underflows gradients
+        amp = scaler.is_enabled()
+
+        # Let reconstruction losses settle before the adversarial loss kicks in
+        warmup = pco.training.loss.adv_warmup_steps
+        adv_scale = min(1.0, global_step / warmup) if warmup > 0 else 1.0
         for i in range(steps):
             # This is for gradient accumulation
             start = mini_batch_size * i
@@ -148,7 +156,7 @@ class TrainingPipeline:
                     m_c, p=pco.training.stablizers.mask_jitter_prob)
                 m_f = 1 - m_c  # Inverted m_c or non-hair binary mask
 
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.cuda.amp.autocast(enabled=amp):
                 f_h = self.E_H(I_s)
                 f_m = self.E_M(I_s)["kp"].view(I_s.size(0), -1, 3)
                 f_m_d = self.E_M(I_d)["kp"].view(I_s.size(0), -1, 3)
@@ -178,7 +186,7 @@ class TrainingPipeline:
 
             del disc_loss
 
-            with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+            with torch.cuda.amp.autocast(enabled=amp):
                 f_c = self.E_C(I_d_dilde)
                 I_p = self.D(f_c, f_w, m_c)
 
@@ -189,7 +197,8 @@ class TrainingPipeline:
                 p.requires_grad = False
 
             gen_losses = self.losses.compute_generator_losses(
-                I_d, I_p, m_c, m_f, self.L_adv)
+                I_d, I_p, m_c, m_f, self.L_adv,
+                amp=amp, adv_scale=adv_scale)
 
             gen_loss = gen_losses["generator_loss"]
             for k, v in gen_losses.items():
