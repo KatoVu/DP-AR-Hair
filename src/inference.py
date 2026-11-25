@@ -161,6 +161,7 @@ class HairShifter:
             del self.generator, self.pose_estimator
 
         driving_frames = []
+        skipped = 0
 
         source_tensor = self.input_transform(source_frame).to(self.device)
         source_tensor = source_tensor.unsqueeze(0)  # [1, C, H, W]
@@ -177,14 +178,25 @@ class HairShifter:
 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+            # None = use model output; a frame = write it unchanged (no face)
+            passthrough = None
             if align:
-                frame = align_face(cv2_to_pil(frame))[0]
-                batch_buffer[len(driving_frames)] = T.Resize(
-                    (self.in_size, self.in_size))(frame)
+                try:
+                    # frame is already RGB, so no cv2_to_pil (it swaps channels)
+                    aligned = align_face(PIL.Image.fromarray(frame),
+                                         predictor=self.predictor)[0]
+                    batch_buffer[len(driving_frames)] = T.Resize(
+                        (self.in_size, self.in_size))(aligned)
+                except ValueError:
+                    # No face detected: keep the original frame in the output
+                    passthrough = frame
+                    skipped += 1
+                    batch_buffer[len(driving_frames)] = self.input_transform(
+                        frame)
             else:
                 batch_buffer[len(driving_frames)] = self.input_transform(frame)
 
-            driving_frames.append(1)  # Just to count
+            driving_frames.append(passthrough)
 
             is_full_batch = len(driving_frames) == self.batch_size
             is_last_batch = i == length
@@ -195,6 +207,7 @@ class HairShifter:
                 bs = driving_batch.shape[0]
                 source_batch = source_tensor.expand(bs, -1, -1, -1)
 
+                passthroughs = list(driving_frames)
                 driving_frames.clear()
 
                 if ema:
@@ -217,17 +230,22 @@ class HairShifter:
 
                 del driving_batch, source_batch
 
-                for i in range(output_batch.shape[0]):
-                    frame = output_batch[i].detach().cpu()
-                    frame = frame.permute(1, 2, 0)
-                    frame = frame.clamp(0, 1)
-                    frame = (frame * 255).byte().numpy()
+                for j, original in enumerate(passthroughs):
+                    if original is not None:
+                        frame = cv2.resize(original, frame_size)
+                    else:
+                        frame = output_batch[j].detach().cpu()
+                        frame = frame.permute(1, 2, 0)
+                        frame = frame.clamp(0, 1)
+                        frame = (frame * 255).byte().numpy()
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                     self.validate_frame(frame, frame_size[0], frame_size[1])
                     out_video.write(frame)
 
         out_video.release()
+        if skipped:
+            print(f"{skipped} frame(s) had no face and were kept unchanged")
         print(f"Video created at: {output_path}")
 
 
