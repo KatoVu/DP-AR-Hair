@@ -2,6 +2,7 @@ import PIL
 import cv2
 import argparse
 import torch
+import torch.nn.functional as F
 import math
 import numpy as np
 from pathlib import Path
@@ -208,6 +209,11 @@ class HairShifter:
                 # WARN: If no longer used then maybe just discard this
                 if ema:
                     self.ema.restore()
+
+                # Model outputs 256x256; upscale to the video frame size
+                output_batch = F.interpolate(
+                    output_batch.float(), size=frame_size,
+                    mode="bilinear", align_corners=False)
 
                 del driving_batch, source_batch
 

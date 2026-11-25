@@ -7,7 +7,12 @@ from loaders.loader import load_models
 from models.msg_spade_decoder import MSGSpadeDecoder
 from losses.loss_handler import LossHandler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from hairshifter.utils import discriminator_augment_pair, jitter_binary_mask
+from hairshifter.utils import (
+    discriminator_augment_pair,
+    jitter_binary_mask,
+    strip_ddp_prefix,
+    unwrap,
+)
 from configs.pipeline_config import pipeline_config as pco
 
 
@@ -49,10 +54,12 @@ class TrainingPipeline:
         self.D = MSGSpadeDecoder(self.D_C, self.D_S)
 
         # include any parameters that require grad from D_S and E_C
+        # Use the unwrapped modules so names have no DDP "module." prefix
+        # and match the keys InferencePipeline expects
         self.synthesizer_decoder_trainable_dict = {
-            k: p for k, p in self.D_S.named_parameters() if p.requires_grad}
+            k: p for k, p in self.D_S.module.named_parameters() if p.requires_grad}
         self.context_encoder_trainable_dict = {
-            k: p for k, p in self.E_C.named_parameters() if p.requires_grad}
+            k: p for k, p in self.E_C.module.named_parameters() if p.requires_grad}
         self.generator_trainable_dict = self.synthesizer_decoder_trainable_dict | \
             self.context_encoder_trainable_dict
 
@@ -214,13 +221,9 @@ class TrainingPipeline:
         extra: optional dict with arbitrary metadata.
         """
         payload = {"epoch": epoch}
-        # modules
+        # Save unwrapped modules so checkpoints load without DDP
         for name, module in self.modules_to_save.items():
-            try:
-                payload[name] = module.state_dict()
-            except Exception:
-                # fallback: skip
-                pass
+            payload[name] = unwrap(module).state_dict()
 
         # optimizers
         payload["generator_optimizer"] = self.generator_optimizer.state_dict()
@@ -240,10 +243,7 @@ class TrainingPipeline:
         ck = torch.load(path, map_location=self.device)
         for name, module in self.modules_to_save.items():
             if name in ck:
-                try:
-                    module.load_state_dict(ck[name], strict=False)
-                except Exception:
-                    module.load_state_dict(ck[name])
+                unwrap(module).load_state_dict(strip_ddp_prefix(ck[name]))
 
         if load_optimizers:
             if "generator_optimizer" in ck:
@@ -254,8 +254,9 @@ class TrainingPipeline:
                 self.disc_optimizer.load_state_dict(ck["disc_optimizer"])
 
             if "ema" in ck:
+                ema = strip_ddp_prefix(ck["ema"])
                 for name, param in self.generator_trainable_dict.items():
-                    if param.requires_grad and name in ck['ema']:
-                        self.ema.shadow[name] = ck['ema'][name].clone()
+                    if param.requires_grad and name in ema:
+                        self.ema.shadow[name] = ema[name].clone()
 
         return ck
